@@ -23,7 +23,20 @@ table = [ [arith "^" Pow E.AssocLeft]
         , [arith "&&" And E.AssocLeft, arith "||" Or E.AssocLeft]
         , [prefix "-" $ EAex Min (ECst 0)]
         , [binary "$" EApp E.AssocLeft]
+        , [binary "::" ELst E.AssocRight]
         ]
+
+motif :: Parser Motif
+motif = whiteSpace *> E.buildExpressionParser [
+        [E.Infix (MLst <$ reservedOp "::") E.AssocRight]
+    ] (lexeme (do
+        xs <- identifier
+        if xs == "_"
+            then return MWdc 
+            else return $ MVar xs)
+    <|> lexeme (MCpl <$> parens (commaSep1 motif))
+    <|> lexeme (MNil <$ string "[]")
+    <|> parens motif)
 
 expr :: Parser Expr
 expr = whiteSpace *> E.buildExpressionParser table term
@@ -31,9 +44,11 @@ expr = whiteSpace *> E.buildExpressionParser table term
 
 term :: Parser Expr
 term = lexeme (
-        try fun
+        try fncP
+    <|> try fun
     <|> try letP
     <|> try ifP
+    <|> try matchP
     <|> atoms
     <?> "Could not parse term")
 
@@ -43,6 +58,8 @@ atom = lexeme (
     <|> EVar <$> identifier
     <|> braces expr
     <|> try (parens expr)
+    <|> (foldr ELst ENil <$> brackets (semiSep expr))
+    <|> (ECpl <$> parens (commaSep1 expr))
     <?> "Could not parse atom")
 
 atoms :: Parser Expr
@@ -53,7 +70,7 @@ atoms = lexeme (
 fun :: Parser Expr
 fun = lexeme (do
     lexeme $ reserved "fun"
-    xs <- many1 $ lexeme identifier
+    xs <- many1 $ lexeme motif
     lexeme $ reserved "=>"
     e <- lexeme expr
     return $ foldr EFun e xs
@@ -62,15 +79,23 @@ fun = lexeme (do
 letP :: Parser Expr
 letP = lexeme $ do
     lexeme $ reserved "let"
-    xs <- many1 $ lexeme identifier
+    m1 <- many1 $ lexeme motif
     lexeme $ reserved "="
     e1 <- lexeme expr
+    cs <- many (do
+        lexeme $ reserved "and"
+        m <- many1 $ lexeme motif
+        lexeme $ reserved "="
+        e <- lexeme expr
+        return (m, e))
     lexeme $ reserved "in"
     e2 <- lexeme expr
-    return $ case xs of
-        []     -> e2
-        [x]    -> ELet x e1 e2
-        (x:xs) -> ELet x (foldr EFun e1 xs) e2
+    return $ foldr (\ (ms, e) e' ->
+        case ms of
+            []     -> e'
+            [x]    -> ELet x e e'
+            (x:xs) -> ELet x (foldr EFun e xs) e'
+        ) e2 ((m1,e1):cs)
 
 ifP :: Parser Expr
 ifP = lexeme $ do
@@ -81,6 +106,32 @@ ifP = lexeme $ do
     lexeme $ reserved "else"
     e2 <- lexeme expr
     return $ EIte eb e1 e2
+
+matchP :: Parser Expr
+matchP = lexeme $ do
+    lexeme $ reserved "match"
+    e0 <- lexeme expr
+    lexeme $ reserved "with"
+    cs <- many1 $ lexeme $ do
+        lexeme $ reservedOp "|"
+        m <- motif
+        lexeme $ string "->"
+        e <- expr
+        return (m, e)
+    return $ EMch e0 cs
+
+fncP :: Parser Expr
+fncP = lexeme $ do
+    lexeme $ reserved "function"
+    cs <- many1 $ lexeme $ do
+        lexeme $ reservedOp "|"
+        m <- motif
+        lexeme $ string "->"
+        e <- expr
+        return (m, e)
+    let n = sum . map (length . varsOfExpr . snd) $ cs
+        v = "&" ++ show n
+    return $ EFun (MVar v) (EMch (EVar v) cs)
 
 parseFromString :: String -> Either ParseError Expr
 parseFromString = parse (expr <* eof) "<buffer>"

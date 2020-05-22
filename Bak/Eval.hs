@@ -6,8 +6,6 @@ import           Control.Monad (void, forM, mapM_, (>>))
 import           Control.Monad.Reader
 import           Control.Monad.State
 
-import           Data.List (delete)
-
 import Debug.Trace
 
 import qualified Data.Vector as V
@@ -18,23 +16,26 @@ data Val = VCst Int
          | VFun String Expr
          deriving (Eq, Show, Ord)
 
+instance Prettify Val where
+    prettify = \case
+        VCst k   -> show k
+        VFun _ _ -> "<fun>"
+
 data Thunk = TVal Val
            | TRaw Expr
+           | TRef Int
            deriving (Eq, Show, Ord)
-
-data Cont = CRhs EAop Expr
-          | CLhs EAop Int
-          | CApp Expr
-          deriving (Eq, Show, Ord)
 
 data RError = ValueError
             | UnboundVar String
+            | NoMatch
             | PanicError
             deriving (Eq, Show, Ord)
 
-type REnv = V.Vector (String, Thunk, Int)
-type RStack = [Cont]
-type Red = ReaderT (RStack, Int) (StateT REnv (Either RError))
+type REnv = [String, Int]
+type RMem = V.Vector (Thunk, REnv)
+type RState = (REnv, RMem)
+type Red = ReaderT REnv (StateT RMem (Either RError))
 
 reduceToValOp :: EAop -> (Int -> Int -> Int)
 reduceToValOp Add = (+)
@@ -57,54 +58,60 @@ debug x = trace (">> " ++ show x) $ return ()
 err :: RError -> Red a
 err = lift . lift . Left
 
-{-
+buildEnv :: [(String, Val)] -> Red REnv
+buildEnv = mapM $ \(x, v) -> do
+    ref <- save $ ECst 0
+    update ref (TVal v)
+    return (x, ref)
+
 usefulEnv :: Expr -> REnv -> REnv
 usefulEnv e env = aux (varsOfExpr e) env
     where aux p [] = []
-          aux p (q@(y,ref):qs)
-            | y `elem` p = q : aux (delete y p) qs
-            | otherwise  = aux p qs
+          aux p (q@(y,ref):qs) = if y `elem` p then q : (aux (delete y p) qs) else aux p qs
 
-alloc :: Thunk -> Red Int
-alloc thk = do
+save :: Thunk -> Red Int
+save thk e = do
     mem <- lift get
     let ref = V.length mem
     lift $ put $ V.snoc mem thk
     return ref
 
-push :: Expr -> Red Int
-push e = do
-    env <- ask
-    mem <- lift get
-    debug "push"
-    debug (env,mem)
-    let uenv = usefulEnv e env
-    alloc (TRaw e' uenv)
-
-pushr :: Expr -> Red Int
-pushr e = do
-    env <- ask
-    mem <- lift get
-    debug "push"
-    debug (env,mem)
-    let uenv = usefulEnv e ((x, V.length mem) : env)
-    alloc (TRaw e' uenv)
+push :: String -> Expr -> Red a -> Red a
+push x e s = case x of
+    "_" -> s
+    _   -> do
+        env <- ask
+        let uenv = usefulEnv env
+        ref <- save (TRaw e, uenv)
+        local ((x, ref) :) s
 
 find :: String -> Red Int
 find x = do
-    (env, stack) <- env
+    env <- ask
     debug "find"
     debug x
-    debug (env, stack)
+    debug sptr
     case lookup x env of
         Nothing  -> err $ UnboundVar x
-        Just ref -> return ref
+        Just ref -> retunr ref
+    let aux idx
+          | idx < 0   = err $ UnboundVar x :: Red Int
+          | otherwise = do
+                    lift get >>= debug
+                    debug idx
+                    (y, ref) <- V.indexM env idx
+                    if x == y
+                        then return ref
+                        else aux (idx-1)
+    if sptr >= 0
+        then aux (sptr-1)
+        else aux (V.length env-1)
 
 repr :: Int -> Red Int
 repr ref = do
-    mem <- lift get
+    (env, mem) <- lift get
     (ref', mem') <- aux ref mem
-    put mem'
+    put (env, mem')
     return ref'
     where aux ref mem = do
             (thk, lst) <- V.indexM mem ref
@@ -116,31 +123,35 @@ repr ref = do
 
 update :: Int -> Thunk -> Red ()
 update ref thk = do
-    mem <- lift get
-    (_, env) <- V.indexM mem ref
-    lift $ put $ mem V.// [(ref, (thk, env))]
--}
+    (env, mem) <- lift get
+    (_, lst) <- V.indexM mem ref
+    let mem' = mem V.// [(ref, (thk, lst))]
+    lift $ put (env, mem')
 
-find :: String -> Red Val
-find x = do
-    env <- lift get
+reduceToValI :: Int -> Red Val
+reduceToValI ref = do
+    ref' <- repr ref
+    (_, mem) <- lift get
+    (thk, lst) <- V.indexM mem ref'
+    case thk of
+        TRef _ -> err PanicError
+        TVal v -> return v
+        TRaw e -> do
+            v <- local (const lst) $ reduceToVal e
+            update ref (TVal v)
+            return v
 
 reduceToVal :: Expr -> Red Val
 reduceToVal = \case
     ECst k -> return $ VCst k
     EVar x -> do
-        ref <- find 
-    EThk ref -> do
+        ref <- find x
         v <- reduceToValI ref
         return v
-    EFun x e -> do
-        env <- ask
-        let uenv = usefulEnv e env
-        return $ VFun x e uenv
+    EFun x e -> return $ VFun x e
     ELet x e1 e2 -> do
-        ref <- pushr e1
-        let e' = subst x (EThk ref) e2
-        v <- reduceToVal 
+        push x e1
+        reduceToVal e2
     EAex op e1 e2 -> do
         lhs <- reduceToVal e1
         rhs <- reduceToVal e2
@@ -151,7 +162,8 @@ reduceToVal = \case
         v1 <- reduceToVal e1
         case v1 of 
             VFun x e -> do
-                pushr x e2 $ reduceToVal e
+                push x e2
+                reduceToVal e
             _ -> err ValueError
     EIte eb e1 e2 -> do
         v <- reduceToVal eb
@@ -163,4 +175,4 @@ reduceToVal = \case
             _ -> err ValueError
 
 eval :: [(String, Val)] -> Expr -> Either RError Val
-eval env expr = fst <$> runStateT (reduceToVal expr) (V.empty, V.empty)
+eval env expr = fst <$> runStateT (runReaderT (buildEnv env >> reduceToVal expr) (-1)) (V.empty, V.empty)

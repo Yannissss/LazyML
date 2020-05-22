@@ -18,23 +18,25 @@ data Val = VCst Int
          | VFun String Expr
          deriving (Eq, Show, Ord)
 
-data Thunk = TVal Val
-           | TRaw Expr
-           deriving (Eq, Show, Ord)
+instance Prettify Val where
+    prettify = \case
+        VCst k   -> show k
+        VFun _ _ -> "<fun>"
 
-data Cont = CRhs EAop Expr
-          | CLhs EAop Int
-          | CApp Expr
-          deriving (Eq, Show, Ord)
+data Thunk = TVal Val
+           | TRaw Expr REnv
+           | TRef Int
+           deriving (Eq, Show, Ord)
 
 data RError = ValueError
             | UnboundVar String
+            | NoMatch
             | PanicError
             deriving (Eq, Show, Ord)
 
-type REnv = V.Vector (String, Thunk, Int)
-type RStack = [Cont]
-type Red = ReaderT (RStack, Int) (StateT REnv (Either RError))
+type REnv = [(String, Int)]
+type RMem = V.Vector Thunk
+type Red = ReaderT REnv (StateT RMem (Either RError))
 
 reduceToValOp :: EAop -> (Int -> Int -> Int)
 reduceToValOp Add = (+)
@@ -57,7 +59,11 @@ debug x = trace (">> " ++ show x) $ return ()
 err :: RError -> Red a
 err = lift . lift . Left
 
-{-
+buildEnv :: [(String, Val)] -> Red REnv
+buildEnv = mapM $ \(x, v) -> do
+    ref <- save $ TVal v
+    return (x, ref)
+
 usefulEnv :: Expr -> REnv -> REnv
 usefulEnv e env = aux (varsOfExpr e) env
     where aux p [] = []
@@ -92,10 +98,11 @@ pushr e = do
 
 find :: String -> Red Int
 find x = do
-    (env, stack) <- env
+    env <- ask
+    mem <- lift get
     debug "find"
     debug x
-    debug (env, stack)
+    debug (env, mem)
     case lookup x env of
         Nothing  -> err $ UnboundVar x
         Just ref -> return ref
@@ -119,17 +126,28 @@ update ref thk = do
     mem <- lift get
     (_, env) <- V.indexM mem ref
     lift $ put $ mem V.// [(ref, (thk, env))]
--}
 
-find :: String -> Red Val
-find x = do
-    env <- lift get
+reduceToValI :: Int -> Red Val
+reduceToValI ref = do
+    ref' <- repr ref
+    mem <- lift get
+    (thk, env) <- V.indexM mem ref'
+    case thk of
+        TRef _ -> err PanicError
+        TVal v -> return v
+        TRaw e uenv -> do
+            let e' = foldr (\(x,ref) e -> subst x (EThk ref) e) e uenv
+            v <- local (const []) $ reduceToVal e
+            update ref (TVal v)
+            return v
 
 reduceToVal :: Expr -> Red Val
 reduceToVal = \case
     ECst k -> return $ VCst k
     EVar x -> do
-        ref <- find 
+        ref <- find x
+        v <- reduceToValI ref
+        return v
     EThk ref -> do
         v <- reduceToValI ref
         return v
@@ -140,7 +158,6 @@ reduceToVal = \case
     ELet x e1 e2 -> do
         ref <- pushr e1
         let e' = subst x (EThk ref) e2
-        v <- reduceToVal 
     EAex op e1 e2 -> do
         lhs <- reduceToVal e1
         rhs <- reduceToVal e2
@@ -163,4 +180,7 @@ reduceToVal = \case
             _ -> err ValueError
 
 eval :: [(String, Val)] -> Expr -> Either RError Val
-eval env expr = fst <$> runStateT (reduceToVal expr) (V.empty, V.empty)
+eval env expr = fst <$> runStateT (runReaderT (do
+    env <- buildEnv env
+    local (const env) $ reduceToVal expr
+    ) []) V.empty
