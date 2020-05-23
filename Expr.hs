@@ -11,7 +11,6 @@ data EAop = Pow
 
 data Expr = ECst Int
           | EVar String
-          | EThk Int
           | EApp Expr Expr
           | EFun String Expr
           | EBnd Expr
@@ -29,16 +28,6 @@ varsOfExpr = \case
     EAex _ e1 e2  -> union (varsOfExpr e1) (varsOfExpr e2)
     EIte e1 e2 e3 -> union (union (varsOfExpr e1) (varsOfExpr e2)) (varsOfExpr e3)
     _             -> []
-
-subst :: String -> Expr -> Expr -> Expr
-subst x u = \case
-    EVar y | x == y -> u
-    EApp e1 e2 -> EApp (subst x u e1) (subst x u e2)
-    EFun y e | x /= y -> EFun y (subst x u e)
-    ELet y e1 e2 | x /= y -> ELet y (subst x u e1) (subst x u e2)
-    EAex op e1 e2 -> EAex op (subst x u e1) (subst x u e2)
-    EIte e1 e2 e3 -> EIte (subst x u e1) (subst x u e2) (subst x u e3)
-    e@_  -> e
 
 class Prettify a where
     prettify :: a -> String
