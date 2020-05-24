@@ -16,7 +16,7 @@ import           Expr
 import           Kernel
 
 type RMem = V.Vector (String, Thunk, Loc)
-type Red = (StateT (RMem, Int, [Int], [(Post, Loc)]) (Either Error))
+type Red = (StateT (RMem, Int, [Int], [Post]) (Either Error))
 
 debug :: Red ()
 debug = do
@@ -58,10 +58,12 @@ instance KoalaMonad Red where
         (mem, pc, stk, dfs) <- get
         (x, _, loc') <- V.indexM mem loc 
         put (mem V.// [(loc, (x, thk, loc'))], pc, stk, dfs)
+    thunk loc = do
+        (mem, _, _, _) <- get
+        (_, thk, loc') <- V.indexM mem loc
+        return (thk, loc')
     find x = do
         (mem, pc, _, _) <- get
-        trace (">> find: " ++ x) $ return ()
-        debug
         let aux loc
                 | loc < 0  = raise $ UnboundVar x
                 | otherwise = do
@@ -72,10 +74,10 @@ instance KoalaMonad Red where
         let len = V.length mem
         if pc >= len
             then aux (len-1)
-            else aux pc
+            else aux (pc-1)
     defer df = do
         (mem, pc, stk, dfs) <- get
-        put (mem, pc, stk, (df, pc) : dfs)
+        put (mem, pc, stk, df : dfs)
     next = do
         (mem, pc, stk, dfs) <- get
         case dfs of
@@ -93,20 +95,7 @@ instance KoalaMonad Red where
             else do
                 put (mem V.// [(pc, (x, TRaw e, loc))], pc + 1, stk, dfs)
                 return pc
-    reduceNF loc = do
-        (mem, _, _, dfs) <- get
-        (x, thk, loc') <- V.indexM mem loc
-        case thk of
-            TVal v -> trace (">> reduceNF (reused) " ++ x) $ return v
-            TRaw e -> do
-                save
-                jump loc'
-                v <- koalaMachine e
-                ret
-                trace (">> reduceNF (new)" ++ x) $ return ()
-                (mem, pc, stk, _) <- get
-                put (mem V.// [(loc, (x, TVal v, loc'))], pc, stk, dfs)
-                return v
+    reduceNF loc = debug >> return (VCst 0)
 
 eval :: [(String, Value)] -> Expr -> Either Error Value
 eval env expr = let z = runStateT (pushEnv env >> koalaMachine expr <* debug) (V.empty, 0, [], []) in

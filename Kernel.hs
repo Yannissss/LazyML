@@ -3,6 +3,8 @@ module Kernel where
 
 import Data.Functor ((<$))
 
+import Debug.Trace
+
 import Expr
 
 type Loc = Int
@@ -15,12 +17,11 @@ data Thunk = TVal Value
            | TRaw Expr
            deriving (Eq, Show, Ord)
 
-data Post = PRhs EAop Expr
-          | PLhs EAop Int
-          | PApp Expr
-          | PIfe Expr Expr
-          | PSave Loc
-          | PJump Loc
+data Post = PRhs Loc EAop Expr
+          | PLhs Loc EAop Int
+          | PIfe Loc Expr Expr
+          | PApp Expr Loc
+          | PSave Loc Loc
           deriving (Eq, Show, Ord)
 
 data Error = ValueError
@@ -35,9 +36,10 @@ class Monad m => KoalaMonad m where
     location :: m Loc
     raise :: Error -> m a
     update :: Loc -> Thunk -> m ()
+    thunk :: Loc -> m (Thunk, Loc)
     find :: String -> m Loc
     defer :: Post -> m ()
-    next :: m (Maybe (Post, Loc))
+    next :: m (Maybe Post)
     push :: String -> Expr -> Loc -> m Loc
     reduceNF :: Loc -> m Value
 
@@ -56,56 +58,66 @@ koalaOp Geq = \x y -> if x >= y then 1 else 0
 koalaOp Eq  = \x y -> if x == y then 1 else 0
 koalaOp Df  = \x y -> if x /= y then 1 else 0
 
-koalaMachine :: (KoalaMonad m)
-                => Expr 
-                -> m Value
-koalaMachine = \case 
-    ECst k -> do
-        post <- next
-        case post of
-            Nothing -> return $ VCst k
-            Just (PLhs op k', loc) -> do
-                v <- koalaMachine $ ECst (koalaOp op k k')
+postprocess :: (KoalaMonad m)
+            => Value
+            -> m Value
+postprocess v = do
+    post <- next
+    case post of
+        Nothing -> return v
+        Just p -> case (v,p) of
+            (_, PSave loc loc') -> do
+                update loc (TVal v)
+                jump loc'
+                postprocess v
+            (VCst k', PLhs loc op k) -> do
                 jump loc
-                return v
-            Just (PRhs op e', loc) -> do
-                defer (PLhs op k)
-                koalaMachine e'
-            Just (PIfe e1 e2, loc) -> do
-                v <- if k /= 0 
-                        then koalaMachine e1 
-                        else koalaMachine e2
-                jump loc
-                return v
-            Just (PSave loc, _) -> do
-                 
-            _ -> raise ValueError
-    EVar x -> find x >>= reduceNF
-    EApp e1 e2 -> do
-        defer $ PApp e2
-        koalaMachine e1
-    EFun x e -> do
-        post <- next
-        case post of
-            Nothing -> return $ VFun x e
-            Just (PApp e', loc) -> do
+                postprocess $ VCst (koalaOp op k k')
+            (VCst k, PRhs loc op e) -> do
+                defer $ PLhs loc op k
+                koalaMachine e
+            (VCst k, PIfe loc e1 e2) -> do
+                jump loc 
+                if k /= 0 
+                    then koalaMachine e1 
+                    else koalaMachine e2
+            (VFun x e, PApp e' loc) -> do
                 push x e' loc
-                v <- koalaMachine e
-                jump loc
-                return v
+                koalaMachine e
             _ -> raise ValueError
+
+koalaMachine :: (KoalaMonad m)
+             => Expr 
+             -> m Value
+koalaMachine = \case 
+    ECst k -> postprocess $ VCst k
+    EFun x e -> postprocess $ VFun x e
+    EVar x -> do
+        loc <- find x
+        (thk, loc') <- thunk loc
+        case thk of
+            TVal v -> postprocess v
+            TRaw e -> do
+                loc'' <- location
+                defer $ PSave loc loc''
+                jump loc'
+                koalaMachine e
+    EApp e1 e2 -> do
+        loc <- location
+        defer $ PApp e2 loc
+        koalaMachine e1
     ELet x e1 e2 -> do
         loc <- location
         push x e1 (loc + 1)
         koalaMachine e2
     EAex op e1 e2 -> do
-        defer $ PRhs op e2
+        loc <- location
+        defer $ PRhs loc op e2
         koalaMachine e1
     EIte e1 e2 e3 -> do
-        defer $ PIfe e2 e3
+        loc <- location
+        defer $ PIfe loc e2 e3
         koalaMachine e1
-    where postprocess = \case
-
 
 pushEnv :: (KoalaMonad m) 
         => [(String, Value)] 

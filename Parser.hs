@@ -65,6 +65,11 @@ letP = lexeme $ do
     xs <- many1 $ lexeme identifier
     lexeme $ reserved "="
     e1 <- lexeme expr
+    cs <- many $ do
+        lexeme $ reserved "and"
+        xs <- many1 $ lexeme identifier
+        lexeme $ reserverd "="
+        e1 <- lexeme expr
     lexeme $ reserved "in"
     e2 <- lexeme expr
     return $ case xs of
