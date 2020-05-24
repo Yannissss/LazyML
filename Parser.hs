@@ -37,12 +37,23 @@ term = lexeme (
     <|> atoms
     <?> "Could not parse term")
 
+patternP :: Parser Pattern
+patternP = lexeme (do
+        xs <- identifier
+        if xs == "_"
+            then return PWdc 
+            else return $ PVar xs)
+    <|> lexeme (PCpl <$> parens (commaSep1 patternP))
+    <|> parens patternP
+    <?> "Could not parse pattern"
+
 atom :: Parser Expr
 atom = lexeme (
         try (ECst  . fromInteger <$> (decimal <|> hexadecimal <|> octal))
     <|> EVar <$> identifier
     <|> braces expr
     <|> try (parens expr)
+    <|> (ECpl <$> parens (commaSep1 expr))
     <?> "Could not parse atom")
 
 atoms :: Parser Expr
@@ -53,7 +64,7 @@ atoms = lexeme (
 fun :: Parser Expr
 fun = lexeme (do
     lexeme $ reserved "fun"
-    xs <- many1 $ lexeme identifier
+    xs <- many1 $ lexeme patternP
     lexeme $ reserved "=>"
     e <- lexeme expr
     return $ foldr EFun e xs
@@ -62,20 +73,22 @@ fun = lexeme (do
 letP :: Parser Expr
 letP = lexeme $ do
     lexeme $ reserved "let"
-    xs <- many1 $ lexeme identifier
+    x1 <- many1 $ lexeme patternP
     lexeme $ reserved "="
     e1 <- lexeme expr
-    cs <- many $ do
+    cs <- many (do
         lexeme $ reserved "and"
-        xs <- many1 $ lexeme identifier
-        lexeme $ reserverd "="
-        e1 <- lexeme expr
+        xs <- many1 $ lexeme patternP
+        lexeme $ reserved "="
+        e <- lexeme expr
+        foldFun xs e)
     lexeme $ reserved "in"
     e2 <- lexeme expr
-    return $ case xs of
-        []     -> e2
-        [x]    -> ELet x e1 e2
-        (x:xs) -> ELet x (foldr EFun e1 xs) e2
+    c <- foldFun x1 e1
+    return $ ELet (c:cs) e2
+    where foldFun [] _     = fail "letP: Empty let declaration"
+          foldFun [x] e    = return (x, e)
+          foldFun (x:xs) e = return (x, foldr EFun e xs)
 
 ifP :: Parser Expr
 ifP = lexeme $ do

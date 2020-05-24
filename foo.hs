@@ -10,6 +10,22 @@ foo s = do
         Right expr -> do
             putStr "Expr:  "
             print expr
-            case eval [] expr of
+            r <- eval [] expr
+            case r of
                 Left err -> putStr "Error: " >> print err
                 Right v  -> putStr "Val:   " >> print v
+
+bar :: String -> IO ()
+bar s = do
+    case parseFromString s of
+        Left err -> putStr "Error: " >> print err
+        Right expr -> do
+            putStr "Expr:  "
+            print expr
+            r <- whnf [] expr
+            case r of
+                Left err -> putStr "Error: " >> print err
+                Right v  -> putStr "Val:   " >> (case v of
+                    TCpl thks _ -> putStrLn $ "TCpl " ++ show thks
+                    TVal v -> putStrLn $ "TVal " ++ show v
+                    TRaw e -> putStrLn $ "TRaw " ++ show e)
