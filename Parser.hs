@@ -92,16 +92,20 @@ letP = lexeme $ do
         foldFun xs e)
     lexeme $ reserved "in"
     e2 <- lexeme expr
-    c <- foldFun x1 e1
-    return $ translate (c:cs) e2
+    c@(x,e) <- foldFun x1 e1
+    case cs of
+        [] -> if varsOfPattern x `encounter` varsOfExpr e
+            then return $ ELet x (EFix $ EFun x e) e2
+            else return $ ELet x e e2
+        _ -> return $ translate (c:cs) e2
     where foldFun [] _     = fail "letP: Empty let declaration"
           foldFun [x] e    = return (x, e)
           foldFun (x:xs) e = return (x, foldr EFun e xs)
           encounter x y    = any (`elem` y) x
           translate cs e2 = let (ps, es) = unzip cs in 
               if varsOfPattern (PCpl ps) `encounter` varsOfExpr (ECpl es)
-                  then EApp (EFun (PCpl ps) e2) (EFix $ EFun (PCpl ps) (ECpl es))
-                  else EApp (EFun (PCpl ps) e2) (ECpl es)
+                  then ELet (PCpl ps) (EFix $ EFun (PCpl ps) (ECpl es)) e2
+                  else ELet (PCpl ps) (ECpl es) e2
 
 ifP :: Parser Expr
 ifP = lexeme $ do

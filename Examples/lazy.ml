@@ -18,5 +18,10 @@ and repeat x = x :: repeat x
 and append l1 l2 = match l1 with
 | []    -> l2
 | x::xs -> x :: (append xs l2)
-and cycle l = append l (cycle l) in
-length $ take 25 $ cycle [1,2,3]
+and cycle l = append l (cycle l)
+and concat = function
+| [] -> []
+| (x::xs) -> append x (concat xs) in
+let bins = aux [[]]
+and aux l = let l' = concat [map (fun x => 0::x) l, map (fun x => 1::x) l] in append l' (aux l') in
+(take 25 $ map fact $ cycle [1,2,3], aux, bins) 

@@ -57,6 +57,13 @@ safeHead :: [a] -> Maybe a
 safeHead [] = Nothing
 safeHead (x:_) = Just x
 
+runKoala :: Koala () -> IO ()
+runKoala s = do 
+    r <- runEitherT s
+    case r of
+        Left err -> putStr "Error: " >> print err
+        Right _ -> return ()
+
 try :: Koala a -> (Error -> Koala a) -> Koala a
 try k ke = EitherT $ do
     r <- runEitherT k
@@ -177,7 +184,8 @@ whnf env = \case
         case v1 of
             WClosure c -> c (\() -> whnf env e2)
             _ -> raise $ PanicError "eval: Not callable"
-    EAex op e1 e2 -> do
+    ELet x e1 e2 -> mkClosureWHNF env x e2 (\() -> whnf env e1)
+    EAex op e1 e2 -> 
         case op of
             And -> do
                 v1 <- whnf env e1
@@ -222,39 +230,3 @@ whnf env = \case
                         ds <- unify p ref
                         env' <- liftIO $ newIORef $ DBnd ds
                         whnf (env' : env) e'
-
-lazyPrint :: WHNF -> Koala ()
-lazyPrint = aux >=> (\() -> liftIO $ putStrLn "")
-    where pint [] = return ()
-          pint [x] = x
-          pint (x:xs) = do
-              x
-              liftIO $ putStr ","
-              pint xs
-          aux = \case
-                WCst k -> liftIO $ putStr $ show k
-                WClosure c -> liftIO $ putStr "<fun>" 
-                WCpl thks ->  do
-                    liftIO $ putStr "("
-                    pint $ map (\th -> th () >>= aux) thks
-                    liftIO $ putStr ")"
-                WNil -> liftIO $ putStr "[]"
-                WCons th1 th2 -> do
-                    liftIO $ putStr "["
-                    th1 () >>= aux
-                    r <- th2 ()
-                    case r of
-                        WNil -> liftIO $ putStr "]"
-                        _ -> do
-                            liftIO $ putStr ","
-                            aux' r
-          aux' = \case
-                WCons th1 th2 -> do
-                    th1 () >>= aux
-                    r <- th2 ()
-                    case r of
-                        WNil -> liftIO $ putStr "]"
-                        _ -> do
-                            liftIO $ putStr ","
-                            aux' r
-                r  -> aux r 

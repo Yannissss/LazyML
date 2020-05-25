@@ -6,12 +6,17 @@ and map f = function
 | x::xs -> f x :: map f xs
 and foldr f acc = function
 | [] -> acc
-| (x::xs) -> f x (foldr f acc xs)
-and any p = foldr (fun x y => p x || y) 0
-and all p = foldr (fun x y => p x && y) 1
+| (x::xs) -> f x (foldr f acc xs) in
+
+let any p = foldr (fun x acc => (p x) || acc) 0
+and all p = foldr (fun x acc => (p x) && acc) 1
 and filter p = function
 | [] -> []
 | x::xs -> if p x then x :: filter p xs else filter p xs
+and zip x y = match (x,y) with
+| ([], _) -> []
+| (_, []) -> []
+| (x::xs, y::ys) -> (x,y) :: zip xs ys
 and not n = if n then 0 else 1
 and natsFrom n = n :: natsFrom (n + 1)
 and nats = natsFrom 0
@@ -25,12 +30,11 @@ and take n l =
 and enum l u = if l > u then [] else l :: (enum (l+1) u)
 and flip f x y = f y x
 and factor x y = not $ y % x
-and isPrime n = not $ any (fun x => n % x = 0) $ enum 2 (n-1)
+in
+
+let isPrime n = not $ any (fun x => n % x = 0) $ enum 2 (n-1)
 and primes = filter isPrime $ natsFrom 2
 and even n = not (n % 2)
-and zip x y = match (x,y) with
-| ([], _) -> []
-| (_, []) -> []
-| (x::xs, y::ys) -> (x,y) :: zip xs ys
 in
+
 filter isPrime $ natsFrom 2
