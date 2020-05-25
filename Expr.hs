@@ -6,6 +6,8 @@ import           Data.List
 data Pattern = PWdc
              | PVar String
              | PCpl [Pattern]
+             | PNil
+             | PCons Pattern Pattern
              deriving (Eq, Show, Ord)
 
 data EAop = Pow
@@ -19,16 +21,20 @@ data Expr = ECst Int
           | EApp Expr Expr
           | EFun Pattern Expr
           | ECpl [Expr]
-          | ELet [(Pattern, Expr)] Expr
           | EAex EAop Expr Expr
           | EIte Expr Expr Expr
+          | EFix Expr
+          | ENil
+          | ECons Expr Expr
+          | EMatch Expr [(Pattern, Expr)]
           deriving (Eq, Show, Ord)
 
 varsOfPattern :: Pattern -> [String]
 varsOfPattern = \case
-    PVar x   -> [x]
-    PCpl xs  -> foldl union [] $ map varsOfPattern xs
-    _        -> []
+    PVar x      -> [x]
+    PCpl xs     -> foldl union [] $ map varsOfPattern xs
+    PCons e1 e2 -> union (varsOfPattern e1) (varsOfPattern e2)
+    _           -> []
 
 varsOfExpr :: Expr -> [String]
 varsOfExpr = \case
@@ -36,11 +42,12 @@ varsOfExpr = \case
     EApp e1 e2    -> union (varsOfExpr e1) (varsOfExpr e2)
     EFun x e      -> difference (varsOfExpr e) (varsOfPattern x)
     ECpl es       -> unions $ map varsOfExpr es
-    ELet ds e2    -> let vars = unions $ map (varsOfPattern . fst) ds
-                         evars = map ((`difference` vars) . varsOfExpr . snd) ds in
-        union (varsOfExpr e2 `difference` vars) (unions evars)
     EAex _ e1 e2  -> union (varsOfExpr e1) (varsOfExpr e2)
-    EIte e1 e2 e3 -> union (union (varsOfExpr e1) (varsOfExpr e2)) (varsOfExpr e3)
+    EIte e1 e2 e3 -> union (varsOfExpr e1 `union` varsOfExpr e2) (varsOfExpr e3)
+    EFix e        -> varsOfExpr e
+    ECons e1 e2   -> union (varsOfExpr e1) (varsOfExpr e2)
+    EMatch e cs   -> union (varsOfExpr e) (unions (map (\(m,e) -> 
+                        difference (varsOfExpr e) (varsOfPattern m)) cs))
     _             -> []
     where difference u v = filter (`notElem` v) u
           unions = foldl union [] 

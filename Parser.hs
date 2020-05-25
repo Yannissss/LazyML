@@ -22,7 +22,8 @@ table = [ [arith "^" Pow E.AssocLeft]
            arith "<" Le E.AssocLeft, arith ">" Ge E.AssocLeft ]
         , [arith "&&" And E.AssocLeft, arith "||" Or E.AssocLeft]
         , [prefix "-" $ EAex Min (ECst 0)]
-        , [binary "$" EApp E.AssocLeft]
+        , [binary "$" EApp E.AssocRight]
+        , [binary "::" ECons E.AssocRight]
         ]
 
 expr :: Parser Expr
@@ -31,29 +32,36 @@ expr = whiteSpace *> E.buildExpressionParser table term
 
 term :: Parser Expr
 term = lexeme (
-        try fun
+        try fncP
+    <|> try fun
     <|> try letP
     <|> try ifP
+    <|> try matchP
     <|> atoms
     <?> "Could not parse term")
 
 patternP :: Parser Pattern
-patternP = lexeme (do
+patternP = whiteSpace *> E.buildExpressionParser [
+        [E.Infix (PCons <$ reservedOp "::") E.AssocRight]
+    ] (lexeme (do
         xs <- identifier
         if xs == "_"
             then return PWdc 
             else return $ PVar xs)
+    <|> try (parens patternP)
     <|> lexeme (PCpl <$> parens (commaSep1 patternP))
-    <|> parens patternP
+    <|> lexeme (PNil <$ string "[]"))
     <?> "Could not parse pattern"
 
 atom :: Parser Expr
 atom = lexeme (
         try (ECst  . fromInteger <$> (decimal <|> hexadecimal <|> octal))
+    <|> ENil <$ reservedOp "[]"
     <|> EVar <$> identifier
     <|> braces expr
     <|> try (parens expr)
     <|> (ECpl <$> parens (commaSep1 expr))
+    <|> (foldr ECons ENil <$> brackets (commaSep1 expr))
     <?> "Could not parse atom")
 
 atoms :: Parser Expr
@@ -85,10 +93,15 @@ letP = lexeme $ do
     lexeme $ reserved "in"
     e2 <- lexeme expr
     c <- foldFun x1 e1
-    return $ ELet (c:cs) e2
+    return $ translate (c:cs) e2
     where foldFun [] _     = fail "letP: Empty let declaration"
           foldFun [x] e    = return (x, e)
           foldFun (x:xs) e = return (x, foldr EFun e xs)
+          encounter x y    = any (`elem` y) x
+          translate cs e2 = let (ps, es) = unzip cs in 
+              if varsOfPattern (PCpl ps) `encounter` varsOfExpr (ECpl es)
+                  then EApp (EFun (PCpl ps) e2) (EFix $ EFun (PCpl ps) (ECpl es))
+                  else EApp (EFun (PCpl ps) e2) (ECpl es)
 
 ifP :: Parser Expr
 ifP = lexeme $ do
@@ -99,6 +112,32 @@ ifP = lexeme $ do
     lexeme $ reserved "else"
     e2 <- lexeme expr
     return $ EIte eb e1 e2
+
+matchP :: Parser Expr
+matchP = lexeme $ do
+    lexeme $ reserved "match"
+    e0 <- lexeme expr
+    lexeme $ reserved "with"
+    cs <- many1 $ lexeme $ do
+        lexeme $ reservedOp "|"
+        m <- patternP
+        lexeme $ string "->"
+        e <- expr
+        return (m, e)
+    return $ EMatch e0 cs
+
+fncP :: Parser Expr
+fncP = lexeme $ do
+    lexeme $ reserved "function"
+    cs <- many1 $ lexeme $ do
+        lexeme $ reservedOp "|"
+        m <- patternP
+        lexeme $ string "->"
+        e <- expr
+        return (m, e)
+    let n = sum . map (length . varsOfExpr . snd) $ cs
+        v = "&" ++ show n
+    return $ EFun (PVar v) (EMatch (EVar v) cs)
 
 parseFromString :: String -> Either ParseError Expr
 parseFromString = parse (expr <* eof) "<buffer>"

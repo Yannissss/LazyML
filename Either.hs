@@ -2,6 +2,7 @@ module Either(EitherT(..), left) where
 
 import Control.Monad (liftM)
 import Control.Monad.Trans.Class (MonadTrans(..))
+import Control.Monad.Fix
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Applicative (Applicative(..), liftA2)
 
@@ -42,3 +43,11 @@ instance Applicative f => Applicative (EitherT l f) where
 
 instance (MonadIO m) => MonadIO (EitherT l m) where
   liftIO = lift . liftIO
+
+instance (MonadFix m) => MonadFix (EitherT l m) where
+  mfix f = EitherT $  Right <$> mfix g
+    where g x = do
+            r <- runEitherT $ f x
+            case r of
+              Right y -> return y
+              Left err -> error "mfix: Uncaught Left value"

@@ -2,12 +2,13 @@
 module Eval where
 
 import           Control.Applicative (liftA2)
-import           Control.Monad (void, forM, mapM_, zipWithM, (>>))
+import           Control.Monad (void, forM, mapM_, zipWithM, (>>), (>=>))
+import           Control.Monad.Fix
 import           Control.Monad.Reader
 import           Control.Monad.State
 import           Control.Monad.Trans
 
-import           Data.List (delete)
+import           Data.List
 
 import           Data.IORef
 
@@ -15,20 +16,30 @@ import           Either
 import           Expr
 
 data Value = VCst Int
-           | VFun Pattern Expr
            | VCpl [Value]
-           deriving (Eq, Show, Ord)
+           | VLst [Value]
+           | VClosure (Thunk -> Koala Value)
 
-data Thunk = TVal Value
-           | TRaw Expr
-           | TCpl [Expr] Env
+instance Show Value where
+    show (VCst k)     = show k
+    show (VCpl vs)    = "(" ++ intercalate "," (map show vs) ++ ")"
+    show (VLst vs)    = "[" ++ intercalate "," (map show vs) ++ "]"
+    show (VClosure _) = "<fun>"
 
-data Cont = CLhs EAop Int
-          | CRhs EAop Expr Env
-          | CCpl [Expr] [Value] Env
-          | CApp Expr Env
-          | CIte Expr Expr Env
-          | CSave (IORef Thunk)
+data WHNF = WCst Int
+          | WClosure (Thunk -> Koala WHNF)
+          | WCpl [Thunk]
+          | WNil
+          | WCons Thunk Thunk
+
+type Thunk = () -> Koala WHNF
+
+instance Show WHNF where
+    show (WCst k)        = show k
+    show (WClosure _)    = "<fun>"
+    show (WCpl thks)     = "(" ++ intercalate "," (map (const "<thk>") thks) ++ ")"
+    show WNil            = "[]"
+    show (WCons th1 th2) = "<thk>::<thk>" 
 
 data Error = ValueError
            | MatchError
@@ -36,157 +47,92 @@ data Error = ValueError
            | PanicError String
            deriving (Eq, Show, Ord)
 
-data Decl = DRaw [String] Pattern Expr
-          | DBnd [(String, (IORef Thunk))]
-data Env = Env [(IORef Decl, Env)]
-type Koala = ReaderT Env (StateT [Cont] (EitherT Error IO))
+data Decl = DRaw [String] Pattern (IORef Thunk)
+          | DBnd [(String, IORef Thunk)]
 
-data State = State Stack Env [(Stack, Env)]
-
-debug env = do
-    liftIO $ putStrLn "[Debug]"
-    forM_ env $ \(ref, _) -> do
-        d <- liftIO $ readIORef ref
-        aux d
-    liftIO $ putStrLn "[/Debug]"
-    where aux = \case
-            DRaw vars x expr -> liftIO $ print (vars, x, expr)
-            DBnd ds -> forM_ ds $ \(x,ref) -> do
-                thk <- liftIO $ readIORef ref
-                liftIO $ case thk of 
-                    TCpl thks _ -> putStrLn $ "TCpl " ++ show thks
-                    TVal v -> putStrLn $ "TVal " ++ show v
-                    TRaw e -> putStrLn $ "TRaw " ++ show e
-
-    {-
-debug :: Koala ()
-debug = do
-    Env env <- ask
-    ks <- lift get
-    let f env p = liftIO $ forM_ env $ \(x, ref, _) -> do
-            thk <- readIORef ref
-            putStrLn $ p ++ "Debug Env _ " ++ x ++ " = " ++ show thk
-        g env p = liftIO $ forM_ env $ \(x, ref, Env env') -> do
-            thk <- readIORef ref
-            putStrLn $ p ++ "Debug Env _ " ++ x ++ " = " ++ show thk
-            f env' " * * * "
-    g env ""
-    liftIO $ forM_ ks $ \k -> do
-        case k of
-            CAppL e (Env env) -> do
-                putStrLn $ "Debug Cont _ Nested Env" 
-                f env " * * * "
-                putStrLn $ "Debug Cont _ " ++ " CAppL " ++ show e
-            CSave _ -> putStrLn "Debug Cont _ Save"-}
+type Env = [IORef Decl]
+type Koala = EitherT Error IO
 
 safeHead :: [a] -> Maybe a
 safeHead [] = Nothing
 safeHead (x:_) = Just x
 
-useful :: Expr -> Env -> Koala Env
-useful expr (Env env) = Env <$> aux (varsOfExpr expr) env
-    where aux _ [] = return []
-          aux vars (d@(ref, _):env') = do
-              decl <- liftIO $ readIORef ref
-              case decl of
-                  DRaw bnds _ _ | any (`elem` bnds) vars -> do
-                      ds <- aux vars env'
-                      return $ d : ds
-                  DBnd bnds -> 
-                      let bnds' = map fst bnds in 
-                        if any (`elem` bnds') vars
-                            then do
-                                ds <- aux vars env'
-                                return $ d : ds
-                            else aux vars env'
-                  _ -> aux vars env'
+try :: Koala a -> (Error -> Koala a) -> Koala a
+try k ke = EitherT $ do
+    r <- runEitherT k
+    case r of
+        Left err -> runEitherT (ke err)
+        Right x -> return (Right x)
 
 raise :: Error -> Koala a
-raise = lift . lift . left
+raise = left
 
-defer :: Cont -> Koala ()
-defer k = do
-    env <- ask
-    ks <- lift get
-    lift $ put (k:ks)
-
-cont :: Koala (Maybe Cont)
-cont = do
-    ks <- lift get
-    case ks of
-        [] -> return Nothing
-        (k:ks) -> do
-            lift $ put ks
-            return $ Just k
-
-push :: Pattern -> Expr -> Env -> Koala a ->  Koala a
-push x expr env s = do
-    let vars = varsOfPattern x
-    uenv <- useful expr env
-    ref <- liftIO $ newIORef $ DRaw vars x expr
-    local (\(Env env') -> Env $ (ref, uenv) : env') s
-
-pushr :: [(Pattern, Expr)] -> Env -> Koala a ->  Koala a
-pushr ds env s = do
-    denv <- forM ds $ \(x, expr) -> do
-        let vars = varsOfExpr expr
-        uenv <- useful expr env
-        ref <- liftIO $ newIORef $ DRaw vars x expr
-        return (ref, uenv)
-    let env' = map (\(ref, Env uenv) -> (ref, Env $ env' ++ uenv)) denv
-    local (\(Env env) -> Env $ env' ++ env) s
-{-
-push :: String -> Expr -> Env -> Koala a ->  Koala a
-push x expr env s = do
-    ref <- liftIO $ newIORef $ TRaw expr
-    local (\(Env env') -> Env $ (x, ref, env) : env') s
-
-pushr :: [(String, Expr)] -> Env -> Koala a ->  Koala a
-pushr ds env s = do
-    denv <- forM ds $ \(x, expr) -> do
-        ref <- liftIO $ newIORef $ TRaw expr
-        return (x, ref, useful expr env)
-    let env' = map (\(x, ref, Env uenv) -> (x, ref, Env $ env' ++ uenv)) denv
-    local (\(Env env) -> Env $ env' ++ env) s
--}
-
-unify :: Env -> Pattern -> Expr -> Koala [(String, IORef Thunk)]
-unify uenv x expr = case x of
-    PWdc -> return []
-    PVar x -> do
-        ref' <- liftIO $ newIORef (TRaw expr)
-        return [(x, ref')]
-    PCpl xs -> do
-        thk <- local (const uenv) $ whnfExpr expr
-        liftIO $ print "Failed here"
-        case thk of
-            TCpl thks env' | length xs == length thks -> do
-                bnds <- zipWithM (unify env') xs thks 
-                return $ concat bnds
+unify :: Pattern -> (IORef Thunk) -> Koala [(String, IORef Thunk)]
+unify p ref = case p of
+    PVar x -> return [(x, ref)]
+    PCpl ps -> do
+        forceToWHNF ref
+        th <- liftIO $ readIORef ref
+        reducee <- th ()
+        refs <- case reducee of
+            WCpl ths | length ps == length ths -> mapM (liftIO . newIORef) ths
             _ -> raise MatchError
+        dss <- zipWithM unify ps refs
+        return $ concat dss
+    PCons p1 p2 -> do
+        forceToWHNF ref
+        th <- liftIO $ readIORef ref
+        reducee <- th ()
+        case reducee of
+            WCons th1 th2 -> do
+                ref1 <- liftIO $ newIORef th1
+                ref2 <- liftIO $ newIORef th2
+                ds1 <- unify p1 ref1
+                ds2 <- unify p2 ref2
+                return $ ds1 ++ ds2
+            _ -> raise MatchError
+    PNil -> do
+        forceToWHNF ref
+        th <- liftIO $ readIORef ref
+        reducee <- th ()
+        case reducee of
+            WNil -> return []
+            _ -> raise MatchError
+    _ -> return []
 
-find :: String -> Koala (IORef Thunk, Env)
-find x = do
-    Env env <- ask
-    debug env
-    let aux [] = raise $ UnboundVar x
-        aux l@((ref, uenv):env') = do
-            decl <- liftIO $ readIORef ref
-            case decl of
-                DBnd ds -> do
-                    liftIO $ print "Hem"
-                    liftIO $ print $ map fst ds
-                    case safeHead $ filter ((x ==) . fst) ds of
-                        Nothing -> aux env'
-                        Just (_, ref') -> return (ref', uenv)
-                DRaw vs y expr | x `elem` vs -> do
-                    liftIO $ print "Ho"
-                    bnds <- unify uenv y expr
-                    liftIO $ print "/Ho"
-                    liftIO $ writeIORef ref (DBnd bnds)
-                    aux l
-                _ -> aux env'
-    aux env <* debug env
+lookupEnv :: Env -> String -> Koala (IORef Thunk)
+lookupEnv env x = case env of
+    [] -> raise $ UnboundVar x
+    (r:rs) -> do
+        d <- liftIO $ readIORef r
+        case d of
+            DBnd ds -> case lookup x ds of
+                Nothing -> lookupEnv rs x
+                Just r  -> return r
+            DRaw vars p ref ->
+                if x `notElem` vars
+                    then lookupEnv rs x
+                    else do
+                        ds <- unify p ref
+                        liftIO $ writeIORef r $ DBnd ds
+                        lookupEnv (r:rs) x
+
+updateWHNF :: IORef Thunk -> WHNF -> Koala ()
+updateWHNF ref reducee = 
+    liftIO $ writeIORef ref (\() -> return reducee)
+
+forceToWHNF :: IORef Thunk -> Koala WHNF
+forceToWHNF ref = do
+    th <- liftIO $ readIORef ref
+    reducee <- th ()
+    updateWHNF ref reducee
+    return reducee
+
+mkClosureWHNF :: Env -> Pattern -> Expr -> Thunk -> Koala WHNF
+mkClosureWHNF env x e th = do
+    ref <- liftIO $ newIORef th
+    dref <- liftIO $ newIORef $ DRaw (varsOfPattern x) x ref
+    whnf (dref : env) e
 
 evalOp :: EAop -> (Int -> Int -> Int)
 evalOp Add = (+)
@@ -204,137 +150,111 @@ evalOp Geq = \x y -> if x >= y then 1 else 0
 evalOp Eq  = \x y -> if x == y then 1 else 0
 evalOp Df  = \x y -> if x /= y then 1 else 0
 
-whnfCont :: Thunk -> Koala Thunk
-whnfCont thk = do
-    k <- cont
-    case k of
-        Nothing -> return thk
-        Just p -> case (thk, p) of
-                    (_, CSave ref) -> do
-                        liftIO $ writeIORef ref thk
-                        whnfCont thk
-                    (TVal (VCst k), CIte e1 e2 env) -> do
-                        if k /= 0
-                            then local (const env) $ whnfExpr e1
-                            else local (const env) $ whnfExpr e2
-                    _ -> raise ValueError
+whnfToVal :: WHNF -> Koala Value
+whnfToVal = \case
+    WCst k -> return $ VCst k
+    WClosure c -> return $ VClosure $ c >=> whnfToVal 
+    WCpl thks ->  VCpl <$> forM thks (\th -> th () >>= whnfToVal)
+    WNil -> return $ VLst []
+    WCons th1 th2 -> do
+        v1 <- th1 () >>= whnfToVal
+        v2 <- th2 () >>= whnfToVal
+        case v2 of
+            VLst vs -> return $ VLst (v1:vs)
+            _ -> raise $ PanicError "whnfToVal: Tail is not a list"
 
-whnfExpr :: Expr -> Koala Thunk
-whnfExpr = \case
-    ECst k -> whnfCont $ TVal $ VCst k
-    EFun x e -> whnfCont $ TVal $ VFun x e
-    EVar x -> whnfVar x
-    ECpl es' -> do
-        env <- ask
-        whnfCont $ TCpl es' env
+eval :: Env -> Expr -> Koala Value
+eval env expr = whnf env expr >>= whnfToVal
+
+whnf :: Env -> Expr -> Koala WHNF
+whnf env = \case
+    ECst k -> return $ WCst k
+    EFun x e -> return $ WClosure $ mkClosureWHNF env x e
+    EVar x -> lookupEnv env x >>= forceToWHNF
+    ECpl es -> return $ WCpl $ map (\e () -> whnf env e) es
     EApp e1 e2 -> do
-        env <- ask
-        defer $ CApp e2 env
-        whnfExpr e1
-    ELet ds e2 -> do
-        env <- ask
-        pushr ds env $ whnfExpr e2
-    EAex op e1 e2 -> TVal <$> evalExpr (EAex op e1 e2) 
-    EIte e1 e2 e3 -> do
-        env <- ask
-        defer $ CIte e2 e3 env
-        whnfExpr e1
-
-whnfVar :: String -> Koala Thunk
-whnfVar x = do
-    (ref, env) <- find x
-    thk <- liftIO $ readIORef ref 
-    case thk of
-        TRaw expr -> do
-            liftIO $ putStrLn $ "[WHNF] New " ++ x
-            defer $ CSave ref
-            local (const env) $ whnfExpr expr
-        _ -> (liftIO $ putStrLn $ "[WHNF] Reused " ++ x) >> whnfCont thk
-
-evalVar :: String -> Koala Value
-evalVar x = do
-    (ref, env) <- find x
-    thk <- liftIO $ readIORef ref
-    case thk of
-        TVal v -> (liftIO $ putStrLn $ "Reused " ++ x ++ " / " ++ show v) >> evalCont v
-        TRaw expr -> do
-            liftIO $ putStrLn $ "New " ++ x
-            defer $ CSave ref
-            local (const env) $ evalExpr expr
-        TCpl (thk:thks) env' -> do
-            liftIO $ putStrLn $ "Partial " ++ x
-            defer $ CSave ref
-            defer $ CCpl thks [] env'
-            local (const env) $ evalExpr thk
-
-evalCont :: Value -> Koala Value
-evalCont v = do
-    k <- cont
-    case k of
-        Nothing -> return v
-        Just p -> case (v,p) of
-            (_, CSave ref) -> do
-                liftIO $ writeIORef ref (TVal v)
-                evalCont v
-            (VCst k2, CLhs op k1) ->
-                evalCont $ VCst $ evalOp op k1 k2
-            (VCst k1, CRhs op e2 env) -> do
-                defer $ CLhs op k1
-                local (const env) $ evalExpr e2
-            (VCst k, CIte e1 e2 env) -> do
-                if k /= 0
-                    then local (const env) $ evalExpr e1
-                    else local (const env) $ evalExpr e2
-            (VFun x e, CApp e' env) -> push x e' env $ evalExpr e
-            (_, CCpl [] vs _) -> evalCont $ VCpl $ reverse (v:vs)
-            (_, CCpl (e:es) vs env) -> do
-                defer $ CCpl es (v:vs) env
-                local (const env) $ evalExpr e
-            _ -> raise ValueError
-
-evalExpr :: Expr -> Koala Value
-evalExpr = \case
-    ECst k -> evalCont $ VCst k
-    EFun x e -> evalCont $ VFun x e
-    EVar x -> evalVar x
-    ECpl es' -> do
-        let (e:es) = es'
-        env <- ask
-        defer $ CCpl es [] env
-        evalExpr e
-    EApp e1 e2 -> do
-        env <- ask
-        defer $ CApp e2 env
-        evalExpr e1
-    ELet ds e2 -> do
-        env <- ask
-        pushr ds env $ evalExpr e2
+        v1 <- whnf env e1
+        case v1 of
+            WClosure c -> c (\() -> whnf env e2)
+            _ -> raise $ PanicError "eval: Not callable"
     EAex op e1 e2 -> do
-        env <- ask
-        defer $ CRhs op e2 env
-        evalExpr e1 
+        case op of
+            And -> do
+                v1 <- whnf env e1
+                case v1 of
+                    WCst k | k == 0 -> return $ WCst 0
+                    WCst _ -> do
+                        v2 <- whnf env e2
+                        case v2 of
+                            WCst k -> return $ WCst k
+                            _ -> raise $ PanicError "eval: Expected int to evaluate op"
+                    _ -> raise $ PanicError "eval: Expected int to evaluate op"
+            Or  -> do
+                v1 <- whnf env e1
+                case v1 of
+                    WCst k | k /= 0 -> return v1
+                    WCst _ -> do
+                        v2 <- whnf env e2
+                        case v2 of
+                            WCst k -> return $ WCst k
+                            _ -> raise $ PanicError "eval: Expected int to evaluate op"
+                    _ -> raise $ PanicError "eval: Expected int to evaluate op"
+            _   -> do
+                v1 <- whnf env e1
+                v2 <- whnf env e2
+                case (v1, v2) of
+                    (WCst k1, WCst k2) -> return $ WCst $ evalOp op k1 k2
+                    _ -> raise $ PanicError "eval: Expected int to evaluate op"
     EIte e1 e2 e3 -> do
-        env <- ask
-        defer $ CIte e2 e3 env
-        evalExpr e1
+        vb <- whnf env e1
+        case vb of
+            WCst k -> if k /= 0 then whnf env e2 else whnf env e3
+            _ -> raise $ PanicError "eval: Expected in to evaluate if"
+    EFix e -> whnf env (EApp e (EFix e))
+    ENil -> return WNil
+    ECons e1 e2 -> return $ WCons (\() -> whnf env e1) (\() -> whnf env e2)
+    EMatch e cs -> do
+        ref <- liftIO $ newIORef $ (\() -> whnf env e)
+        match ref cs
+        where match ref [] = raise MatchError
+              match ref ((p,e'):cs) = do
+                  (flip try) (\_ -> match ref cs) $ do
+                        ds <- unify p ref
+                        env' <- liftIO $ newIORef $ DBnd ds
+                        whnf (env' : env) e'
 
-runKoala :: Env -> Koala a -> IO (Either Error a)
-runKoala env k = do
-    s <- runEitherT $ runStateT (runReaderT k env) []
-    return $ fst <$> s
-
-whnf :: [(String, Value)] -> Expr -> IO (Either Error Thunk)
-whnf prelude expr = do
-    env <- forM prelude $ \(x,v) -> do
-        ref <- newIORef (TVal v)
-        return (x, ref)
-    bnd <- newIORef $ DBnd env
-    runKoala (Env [(bnd, Env [])]) $ whnfExpr expr
-
-eval :: [(String, Value)] -> Expr -> IO (Either Error Value)
-eval prelude expr = do
-    env <- forM prelude $ \(x,v) -> do
-        ref <- newIORef (TVal v)
-        return (x, ref)
-    bnd <- newIORef $ DBnd env
-    runKoala (Env [(bnd, Env [])]) $ evalExpr expr
+lazyPrint :: WHNF -> Koala ()
+lazyPrint = aux >=> (\() -> liftIO $ putStrLn "")
+    where pint [] = return ()
+          pint [x] = x
+          pint (x:xs) = do
+              x
+              liftIO $ putStr ","
+              pint xs
+          aux = \case
+                WCst k -> liftIO $ putStr $ show k
+                WClosure c -> liftIO $ putStr "<fun>" 
+                WCpl thks ->  do
+                    liftIO $ putStr "("
+                    pint $ map (\th -> th () >>= aux) thks
+                    liftIO $ putStr ")"
+                WNil -> liftIO $ putStr "[]"
+                WCons th1 th2 -> do
+                    liftIO $ putStr "["
+                    th1 () >>= aux
+                    r <- th2 ()
+                    case r of
+                        WNil -> liftIO $ putStr "]"
+                        _ -> do
+                            liftIO $ putStr ","
+                            aux' r
+          aux' = \case
+                WCons th1 th2 -> do
+                    th1 () >>= aux
+                    r <- th2 ()
+                    case r of
+                        WNil -> liftIO $ putStr "]"
+                        _ -> do
+                            liftIO $ putStr ","
+                            aux' r
+                r  -> aux r 

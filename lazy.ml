@@ -19,4 +19,4 @@ and append l1 l2 = match l1 with
 | []    -> l2
 | x::xs -> x :: (append xs l2)
 and cycle l = append l (cycle l) in
-take 14 $ cycle [0;2;5;6;7]
+length $ take 25 $ cycle [1,2,3]
