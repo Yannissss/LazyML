@@ -3,17 +3,21 @@ module Main where
 import Parser
 import Interpreter
 
+import System.IO
+
 removeTrailling :: String -> String
 removeTrailling = dropWhile (== ' ') . reverse . dropWhile (== ' ')
 
 main :: IO ()
 main = do
+    hSetBuffering stdin NoBuffering
     putStrLn $ "Welcome to the Koala interpreter v0.1 @ 05/2020"
     repl ""
 
 repl :: String -> IO ()
 repl "" = do
     putStr "Koala> "
+    hFlush stdout
     next <- getLine
     case next of
         (':':cmd) -> case words cmd of
