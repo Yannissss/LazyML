@@ -26,6 +26,12 @@ table = [ [arith "^" Pow E.AssocLeft]
         , [binary "::" ECons E.AssocRight]
         ]
 
+program :: Parser Program
+program = do
+    decls <- many uletP
+    expr <- optionMaybe expr
+    return (decls, expr)
+
 expr :: Parser Expr
 expr = whiteSpace *> E.buildExpressionParser table term
      <?> "Could not parse expression"
@@ -106,6 +112,34 @@ letP = lexeme $ do
               if varsOfPattern (PCpl ps) `encounter` varsOfExpr (ECpl es)
                   then ELet (PCpl ps) (EFix $ EFun (PCpl ps) (ECpl es)) e2
                   else ELet (PCpl ps) (ECpl es) e2
+
+uletP :: Parser (Pattern, Expr)
+uletP = lexeme $ do
+    lexeme $ reserved "let"
+    x1 <- many1 $ lexeme patternP
+    lexeme $ reserved "="
+    e1 <- lexeme expr
+    cs <- many (do
+        lexeme $ reserved "and"
+        xs <- many1 $ lexeme patternP
+        lexeme $ reserved "="
+        e <- lexeme expr
+        foldFun xs e)
+    lexeme $ reserved ";;"
+    c@(x,e) <- foldFun x1 e1
+    case cs of
+        [] -> if varsOfPattern x `encounter` varsOfExpr e
+            then return $ (x, EFix $ EFun x e)
+            else return $ (x, e)
+        _ -> return $ translate (c:cs)
+    where foldFun [] _     = fail "letP: Empty let declaration"
+          foldFun [x] e    = return (x, e)
+          foldFun (x:xs) e = return (x, foldr EFun e xs)
+          encounter x y    = any (`elem` y) x
+          translate cs = let (ps, es) = unzip cs in 
+              if varsOfPattern (PCpl ps) `encounter` varsOfExpr (ECpl es)
+                  then (PCpl ps, EFix $ EFun (PCpl ps) (ECpl es))
+                  else (PCpl ps, ECpl es)
 
 ifP :: Parser Expr
 ifP = lexeme $ do

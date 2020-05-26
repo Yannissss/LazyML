@@ -30,6 +30,8 @@ data Expr = ECst Int
           | EMatch Expr [(Pattern, Expr)]
           deriving (Eq, Show, Ord)
 
+type Program = ([(Pattern, Expr)], Maybe Expr)
+
 varsOfPattern :: Pattern -> [String]
 varsOfPattern = \case
     PVar x      -> [x]

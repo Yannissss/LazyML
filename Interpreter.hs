@@ -5,61 +5,69 @@ import Control.Monad (forM_, (>=>))
 import Control.Monad.Trans
 
 import Either
-import Eval
 import Expr
+import Eval
 import Kernel
+import Lexer
 import Parser
 
-readEvalPrint :: String -> IO ()
-readEvalPrint s = runKoala $
-    case parseFromString s of
+import Text.Parsec
+
+runProgram :: String -> IO ()
+runProgram fp = do
+    source <- readFile fp
+    runKoala $ case parse (whiteSpace *> (program <* eof)) fp source of
         Left err -> liftIO $ putStr "Error: " >> print err
-        Right expr -> do
-            -- liftIO $ putStr "Expr:  "
-            -- liftIO $ print expr
-            case infer [] expr of
-                Left err -> liftIO $ putStr "Error: " >> putStrLn err
-                Right (t, lib) -> do
-                    -- liftIO $ print lib
-                    liftIO $ forM_ (reverse lib) $ \(x, t) -> do
-                        putStr $ " - " ++ x ++ ": "
-                        putStrLn $ showType t
-                    r <- whnf [] expr
-                    liftIO $ putStr "Val:   - " >> putStr (showType t) >> putStr ": "
-                    lazyPrint r
+        Right (lib, mexpr) -> do
+            let libExpr = foldr (uncurry ELet) (ECst 0) lib
+            case infer [] libExpr of
+                Left err -> liftIO $ putStrLn err
+                Right (_, libT) ->
+                    case mexpr of
+                        Nothing -> return ()
+                        Just expr ->
+                            case infer libT expr of
+                                Left err -> liftIO $ putStrLn err
+                                Right (t, lib') -> do
+                                    liftIO $ forM_ (reverse lib') $ \(x, t) -> do
+                                        putStr $ " - " ++ x ++ ": "
+                                        print t
+                                    r <- whnf [] $ foldr (uncurry ELet) expr lib
+                                    liftIO $ putStr "Val:   - " >> putStr (show t) >> putStr ": "
+                                    lazyPrint r
 
 lazyPrint :: WHNF -> Koala ()
-lazyPrint = aux >=> (\() -> liftIO $ putStrLn "")
-    where pint [] = return ()
-          pint [x] = x
-          pint (x:xs) = do
+lazyPrint = list1 >=> (\() -> liftIO $ putStrLn "")
+    where printTuples [] = return ()
+          printTuples [x] = x
+          printTuples (x:xs) = do
               x
               liftIO $ putStr ","
-              pint xs
-          aux = \case
+              printTuples xs
+          list1 = \case
                 WCst k -> liftIO $ putStr $ show k
                 WClosure c -> liftIO $ putStr "<fun>" 
                 WCpl thks ->  do
                     liftIO $ putStr "("
-                    pint $ map (\th -> th () >>= aux) thks
+                    printTuples $ map (\th -> th () >>= list1) thks
                     liftIO $ putStr ")"
                 WNil -> liftIO $ putStr "[]"
                 WCons th1 th2 -> do
                     liftIO $ putStr "["
-                    th1 () >>= aux
+                    th1 () >>= list1
                     r <- th2 ()
                     case r of
                         WNil -> liftIO $ putStr "]"
                         _ -> do
                             liftIO $ putStr ","
-                            aux' r
-          aux' = \case
+                            list1' r
+          list1' = \case
                 WCons th1 th2 -> do
-                    th1 () >>= aux
+                    th1 () >>= list1
                     r <- th2 ()
                     case r of
                         WNil -> liftIO $ putStr "]"
                         _ -> do
                             liftIO $ putStr ","
-                            aux' r
-                r  -> aux r 
+                            list1' r
+                r  -> list1 r 
